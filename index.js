@@ -49,7 +49,12 @@ app.get("/api/aircraft/:reg", async (req, res) => {
 app.get("/api/live-position/:callsign", async (req, res) => {
   try {
     const { callsign } = req.params;
-    const apiRes = await fetch("https://opensky-network.org/api/states/all");
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    const apiRes = await fetch("https://opensky-network.org/api/states/all", {
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
     const data = await apiRes.json();
     const clean = callsign.replace(/\s/g, "").toUpperCase();
     const match = data.states && data.states.find(function (s) {
