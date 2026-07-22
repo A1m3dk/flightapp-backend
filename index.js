@@ -46,6 +46,28 @@ app.get("/api/aircraft/:reg", async (req, res) => {
   }
 });
 
+app.get("/api/live-position/:callsign", async (req, res) => {
+  try {
+    const { callsign } = req.params;
+    const apiRes = await fetch("https://opensky-network.org/api/states/all");
+    const data = await apiRes.json();
+    const clean = callsign.replace(/\s/g, "").toUpperCase();
+    const match = data.states && data.states.find(function (s) {
+      return s[1] && s[1].trim().toUpperCase() === clean;
+    });
+    if (!match) return res.json(null);
+    res.json({
+      lat: match[6],
+      lon: match[5],
+      altitude: match[7],
+      speed: match[9],
+      heading: match[10],
+      onGround: match[8],
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Server error" });
+  }
+});
 app.get("/api/aircraft-photo/:reg", async (req, res) => {
   try {
     const { reg } = req.params;
