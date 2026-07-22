@@ -1,0 +1,62 @@
+import express from "express";
+import cors from "cors";
+import fetch from "node-fetch";
+import dotenv from "dotenv";
+
+dotenv.config();
+
+const app = express();
+app.use(cors());
+
+const AERODATABOX_KEY = process.env.AERODATABOX_KEY;
+
+app.get("/api/flight/:number/:date", async (req, res) => {
+  try {
+    const { number, date } = req.params;
+    const url = "https://aerodatabox.p.rapidapi.com/flights/number/" + number + "/" + date;
+    const apiRes = await fetch(url, {
+      headers: {
+        "X-RapidAPI-Key": AERODATABOX_KEY,
+        "X-RapidAPI-Host": "aerodatabox.p.rapidapi.com",
+      },
+    });
+    if (!apiRes.ok) return res.status(apiRes.status).json({ error: "Flight not found" });
+    const data = await apiRes.json();
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.get("/api/aircraft/:reg", async (req, res) => {
+  try {
+    const { reg } = req.params;
+    const url = "https://aerodatabox.p.rapidapi.com/aircrafts/reg/" + reg;
+    const apiRes = await fetch(url, {
+      headers: {
+        "X-RapidAPI-Key": AERODATABOX_KEY,
+        "X-RapidAPI-Host": "aerodatabox.p.rapidapi.com",
+      },
+    });
+    if (!apiRes.ok) return res.json(null);
+    const data = await apiRes.json();
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.get("/api/aircraft-photo/:reg", async (req, res) => {
+  try {
+    const { reg } = req.params;
+    const apiRes = await fetch("https://api.planespotters.net/pub/photos/reg/" + reg);
+    if (!apiRes.ok) return res.json(null);
+    const data = await apiRes.json();
+    res.json((data.photos && data.photos[0]) || null);
+  } catch (err) {
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => console.log("Backend running on port " + PORT));
