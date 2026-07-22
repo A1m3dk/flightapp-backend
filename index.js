@@ -69,10 +69,11 @@ app.get("/api/live-position/:callsign", async (req, res) => {
       heading: match[10],
       onGround: match[8],
     });
-  } catch (err) {
-    res.status(500).json({ error: "Server error" });
+} catch (err) {
+    res.status(500).json({ error: "Server error", detail: err.message });
   }
 });
+
 app.get("/api/aircraft-photo/:reg", async (req, res) => {
   try {
     const { reg } = req.params;
