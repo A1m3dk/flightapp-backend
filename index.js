@@ -100,30 +100,18 @@ app.get("/api/aircraft-photo/:reg", async (req, res) => {
 app.get("/api/live-position/:callsign", async (req, res) => {
   try {
     const { callsign } = req.params;
-    const token = await getOpenSkyToken();
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20000);
-    const apiRes = await fetch("https://opensky-network.org/api/states/all", {
-      headers: { Authorization: "Bearer " + token },
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-
+    const apiRes = await fetch("https://api.airplanes.live/v2/callsign/" + callsign);
     if (!apiRes.ok) return res.json(null);
     const data = await apiRes.json();
-    const clean = callsign.replace(/\s/g, "").toUpperCase();
-    const match = data.states && data.states.find(function (s) {
-      return s[1] && s[1].trim().toUpperCase() === clean;
-    });
+    const match = data.ac && data.ac[0];
     if (!match) return res.json(null);
     res.json({
-      lat: match[6],
-      lon: match[5],
-      altitude: match[7],
-      speed: match[9],
-      heading: match[10],
-      onGround: match[8],
+      lat: match.lat,
+      lon: match.lon,
+      altitude: match.alt_baro,
+      speed: match.gs,
+      heading: match.track,
+      onGround: match.alt_baro === "ground",
     });
   } catch (err) {
     res.status(500).json({ error: "Server error", detail: err.message });
