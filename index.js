@@ -88,10 +88,36 @@ app.get("/api/aircraft/:reg", async (req, res) => {
 app.get("/api/aircraft-photo/:reg", async (req, res) => {
   try {
     const { reg } = req.params;
-    const apiRes = await fetch("https://api.planespotters.net/pub/photos/reg/" + reg);
-    if (!apiRes.ok) return res.json(null);
-    const data = await apiRes.json();
-    res.json((data.photos && data.photos[0]) || null);
+
+    const psRes = await fetch("https://api.planespotters.net/pub/photos/reg/" + reg);
+    if (psRes.ok) {
+      const psData = await psRes.json();
+      const psPhoto = psData.photos && psData.photos[0];
+      if (psPhoto) {
+        return res.json({
+          source: "planespotters",
+          imageUrl: psPhoto.thumbnail_large?.src || psPhoto.thumbnail?.src,
+          photographer: psPhoto.photographer,
+          link: psPhoto.link,
+        });
+      }
+    }
+
+    const adRes = await fetch("https://airport-data.com/api/ac_thumb.json?r=" + reg);
+    if (adRes.ok) {
+      const adData = await adRes.json();
+      const adPhoto = adData.data && adData.data[0];
+      if (adPhoto) {
+        return res.json({
+          source: "airport-data",
+          imageUrl: adPhoto.image,
+          photographer: adPhoto.photographer,
+          link: adPhoto.link,
+        });
+      }
+    }
+
+    res.json(null);
   } catch (err) {
     res.status(500).json({ error: "Server error" });
   }
