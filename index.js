@@ -146,3 +146,18 @@ app.get("/api/live-position/:callsign", async (req, res) => {
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log("Backend running on port " + PORT));
+
+app.get("/api/image-proxy", async (req, res) => {
+  try {
+    const imageUrl = req.query.url;
+    if (!imageUrl) return res.status(400).send("Missing url");
+    const imgRes = await fetch(imageUrl);
+    if (!imgRes.ok) return res.status(404).send("Not found");
+    const contentType = imgRes.headers.get("content-type") || "image/jpeg";
+    const buffer = await imgRes.arrayBuffer();
+    res.set("Content-Type", contentType);
+    res.send(Buffer.from(buffer));
+  } catch (err) {
+    res.status(500).send("Error");
+  }
+});
