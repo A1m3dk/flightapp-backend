@@ -168,6 +168,15 @@ app.get("/api/vapid-public-key", (req, res) => {
   res.json({ publicKey: process.env.VAPID_PUBLIC_KEY });
 });
 
+app.delete("/api/push-subscribe/:subscriptionId", async (req, res) => {
+  try {
+    await PushSubscription.deleteOne({ subscriptionId: req.params.subscriptionId });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
 app.post("/api/push-subscribe", async (req, res) => {
   try {
     const { subscriptionId, subscription } = req.body;
