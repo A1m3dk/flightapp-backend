@@ -2,68 +2,76 @@ import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
 import dotenv from "dotenv";
+import webpush from "web-push";
+import cron from "node-cron";
+import { connectDB, TrackedFlight, PushSubscription } from "./db.js";
 
 dotenv.config();
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 
 const AERODATABOX_KEY = process.env.AERODATABOX_KEY;
-const OPENSKY_CLIENT_ID = process.env.OPENSKY_CLIENT_ID;
-const OPENSKY_CLIENT_SECRET = process.env.OPENSKY_CLIENT_SECRET;
 
-let cachedToken = null;
-let tokenExpiresAt = 0;
+webpush.setVapidDetails(
+  "mailto:example@example.com",
+  process.env.VAPID_PUBLIC_KEY,
+  process.env.VAPID_PRIVATE_KEY
+);
 
-async function getOpenSkyToken() {
-  if (cachedToken && Date.now() < tokenExpiresAt) return cachedToken;
+connectDB();
 
-  const res = await fetch(
-    "https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "client_credentials",
-        client_id: OPENSKY_CLIENT_ID,
-        client_secret: OPENSKY_CLIENT_SECRET,
-      }),
-    }
-  );
+async function fetchFlightData(number, date) {
+  const url = "https://aerodatabox.p.rapidapi.com/flights/number/" + number + "/" + date;
+  const res = await fetch(url, {
+    headers: {
+      "X-RapidAPI-Key": AERODATABOX_KEY,
+      "X-RapidAPI-Host": "aerodatabox.p.rapidapi.com",
+    },
+  });
+  if (!res.ok) throw new Error("Flight not found");
+  const data = await res.json();
+  return data[0];
+}
 
-  const rawText = await res.text();
+function getDelayMinutes(leg) {
+  if (!leg) return 0;
+  const scheduled = leg.scheduledTime?.local;
+  const actual = leg.actualTime?.local || leg.predictedTime?.local;
+  if (!scheduled || !actual) return 0;
+  const diffMs = new Date(actual) - new Date(scheduled);
+  const diffMin = Math.round(diffMs / 60000);
+  return diffMin > 0 ? diffMin : 0;
+}
 
-  if (!res.ok) {
-    throw new Error("Token request failed, status " + res.status + ": " + rawText.slice(0, 200));
-  }
+function getStatusPhase(status) {
+  const s = (status || "").toLowerCase();
+  if (s.includes("enroute") || s.includes("approach") || s.includes("diverted")) return "AIRBORNE";
+  if (s.includes("landed") || s.includes("arrived")) return "ARRIVED";
+  if (s.includes("cancel")) return "CANCELLED";
+  return "NOT DEPARTED";
+}
 
-  let data;
+async function sendPushToSubscription(subscriptionId, title, body) {
   try {
-    data = JSON.parse(rawText);
-  } catch (e) {
-    throw new Error("Token response wasn't JSON: " + rawText.slice(0, 200));
+    const record = await PushSubscription.findOne({ subscriptionId });
+    if (!record) return;
+    await webpush.sendNotification(
+      record.subscription,
+      JSON.stringify({ title, body })
+    );
+  } catch (err) {
+    console.log("Push failed:", err.message);
   }
-
-  cachedToken = data.access_token;
-  tokenExpiresAt = Date.now() + (data.expires_in - 60) * 1000;
-  return cachedToken;
 }
 
 app.get("/api/flight/:number/:date", async (req, res) => {
   try {
-    const { number, date } = req.params;
-    const url = "https://aerodatabox.p.rapidapi.com/flights/number/" + number + "/" + date;
-    const apiRes = await fetch(url, {
-      headers: {
-        "X-RapidAPI-Key": AERODATABOX_KEY,
-        "X-RapidAPI-Host": "aerodatabox.p.rapidapi.com",
-      },
-    });
-    if (!apiRes.ok) return res.status(apiRes.status).json({ error: "Flight not found" });
-    const data = await apiRes.json();
-    res.json(data);
+    const data = await fetchFlightData(req.params.number, req.params.date);
+    res.json([data]);
   } catch (err) {
-    res.status(500).json({ error: "Server error" });
+    res.status(404).json({ error: "Flight not found" });
   }
 });
 
@@ -88,7 +96,6 @@ app.get("/api/aircraft/:reg", async (req, res) => {
 app.get("/api/aircraft-photo/:reg", async (req, res) => {
   try {
     const { reg } = req.params;
-
     const psRes = await fetch("https://api.planespotters.net/pub/photos/reg/" + reg);
     if (psRes.ok) {
       const psData = await psRes.json();
@@ -102,7 +109,6 @@ app.get("/api/aircraft-photo/:reg", async (req, res) => {
         });
       }
     }
-
     const adRes = await fetch("https://airport-data.com/api/ac_thumb.json?r=" + reg);
     if (adRes.ok) {
       const adData = await adRes.json();
@@ -116,10 +122,24 @@ app.get("/api/aircraft-photo/:reg", async (req, res) => {
         });
       }
     }
-
     res.json(null);
   } catch (err) {
     res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.get("/api/image-proxy", async (req, res) => {
+  try {
+    const imageUrl = req.query.url;
+    if (!imageUrl) return res.status(400).send("Missing url");
+    const imgRes = await fetch(imageUrl);
+    if (!imgRes.ok) return res.status(404).send("Not found");
+    const contentType = imgRes.headers.get("content-type") || "image/jpeg";
+    const buffer = await imgRes.arrayBuffer();
+    res.set("Content-Type", contentType);
+    res.send(Buffer.from(buffer));
+  } catch (err) {
+    res.status(500).send("Error");
   }
 });
 
@@ -144,20 +164,109 @@ app.get("/api/live-position/:callsign", async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log("Backend running on port " + PORT));
+app.get("/api/vapid-public-key", (req, res) => {
+  res.json({ publicKey: process.env.VAPID_PUBLIC_KEY });
+});
 
-app.get("/api/image-proxy", async (req, res) => {
+app.post("/api/push-subscribe", async (req, res) => {
   try {
-    const imageUrl = req.query.url;
-    if (!imageUrl) return res.status(400).send("Missing url");
-    const imgRes = await fetch(imageUrl);
-    if (!imgRes.ok) return res.status(404).send("Not found");
-    const contentType = imgRes.headers.get("content-type") || "image/jpeg";
-    const buffer = await imgRes.arrayBuffer();
-    res.set("Content-Type", contentType);
-    res.send(Buffer.from(buffer));
+    const { subscriptionId, subscription } = req.body;
+    await PushSubscription.findOneAndUpdate(
+      { subscriptionId },
+      { subscriptionId, subscription },
+      { upsert: true }
+    );
+    res.json({ ok: true });
   } catch (err) {
-    res.status(500).send("Error");
+    res.status(500).json({ error: "Server error" });
   }
 });
+
+app.get("/api/tracked/:subscriptionId", async (req, res) => {
+  try {
+    const flights = await TrackedFlight.find({ subscriptionId: req.params.subscriptionId });
+    res.json(flights);
+  } catch (err) {
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.post("/api/tracked", async (req, res) => {
+  try {
+    const { subscriptionId, flightNumber, date, route } = req.body;
+    const existing = await TrackedFlight.findOne({ subscriptionId, flightNumber, date });
+    if (existing) return res.json(existing);
+    const created = await TrackedFlight.create({ subscriptionId, flightNumber, date, route });
+    res.json(created);
+  } catch (err) {
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.delete("/api/tracked/:id", async (req, res) => {
+  try {
+    await TrackedFlight.findByIdAndDelete(req.params.id);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+async function checkAllTrackedFlights() {
+  const flights = await TrackedFlight.find({});
+  for (const f of flights) {
+    try {
+      const data = await fetchFlightData(f.flightNumber, f.date);
+      const dep = data.departure;
+      const arr = data.arrival;
+
+      const depDelay = getDelayMinutes(dep);
+      const arrDelay = getDelayMinutes(arr);
+      const newStatus = depDelay > 15 || arrDelay > 15 ? "Delayed" : "On time";
+      const statusPhase = getStatusPhase(data.status);
+      const scheduledDep = dep?.scheduledTime?.local;
+      const minsToGo = scheduledDep ? (new Date(scheduledDep) - new Date()) / 60000 : null;
+
+      const updates = { lastStatus: newStatus, lastGate: dep?.gate, lastTerminal: dep?.terminal };
+
+      if (f.lastStatus && f.lastStatus !== newStatus) {
+        sendPushToSubscription(f.subscriptionId, f.flightNumber + " status changed", newStatus);
+      }
+      if (f.lastGate !== dep?.gate && dep?.gate) {
+        sendPushToSubscription(f.subscriptionId, f.flightNumber + " gate assigned", "Gate " + dep.gate);
+      }
+      if (f.lastTerminal !== dep?.terminal && dep?.terminal) {
+        sendPushToSubscription(f.subscriptionId, f.flightNumber + " terminal", "Terminal " + dep.terminal);
+      }
+      if (!f.notifiedCheckin && minsToGo != null && minsToGo <= 24 * 60 && minsToGo > 45) {
+        sendPushToSubscription(f.subscriptionId, f.flightNumber + " check-in open", "Online check-in is now open.");
+        updates.notifiedCheckin = true;
+      }
+      if (!f.notifiedBoardingStart && minsToGo != null && minsToGo <= 45 && minsToGo > 0 && statusPhase === "NOT DEPARTED") {
+        sendPushToSubscription(f.subscriptionId, f.flightNumber + " boarding", "Boarding is expected to begin soon.");
+        updates.notifiedBoardingStart = true;
+      }
+      if (!f.notifiedBoardingEnd && minsToGo != null && minsToGo <= 15 && minsToGo > -60 && statusPhase !== "AIRBORNE") {
+        sendPushToSubscription(f.subscriptionId, f.flightNumber + " boarding closing", "Boarding closes shortly. Head to the gate.");
+        updates.notifiedBoardingEnd = true;
+      }
+      if (!f.notifiedTakeoff && statusPhase === "AIRBORNE") {
+        sendPushToSubscription(f.subscriptionId, f.flightNumber + " has taken off", "The flight is now airborne.");
+        updates.notifiedTakeoff = true;
+      }
+      if (!f.notifiedLanding && statusPhase === "ARRIVED") {
+        sendPushToSubscription(f.subscriptionId, f.flightNumber + " has landed", "The flight has arrived.");
+        updates.notifiedLanding = true;
+      }
+
+      await TrackedFlight.findByIdAndUpdate(f._id, updates);
+    } catch (err) {
+      // skip this flight, keep checking the rest
+    }
+  }
+}
+
+cron.schedule("*/5 * * * *", checkAllTrackedFlights);
+
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => console.log("Backend running on port " + PORT));
