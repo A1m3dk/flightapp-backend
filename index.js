@@ -75,6 +75,108 @@ app.get("/api/flight/:number/:date", async (req, res) => {
   }
 });
 
+app.get("/api/airport-stats/:icao", async (req, res) => {
+  try {
+    const { icao } = req.params;
+    const now = new Date();
+    const from = new Date(now.getTime() - 3 * 60 * 60 * 1000);
+    const to = new Date(now.getTime() + 3 * 60 * 60 * 1000);
+    const fmt = (d) => d.toISOString().slice(0, 16);
+
+    const url = "https://aerodatabox.p.rapidapi.com/flights/airports/icao/" + icao +
+      "/" + fmt(from) + "/" + fmt(to) + "?direction=Departure&withCancelled=true";
+
+    const apiRes = await fetch(url, {
+      headers: {
+        "X-RapidAPI-Key": AERODATABOX_KEY,
+        "X-RapidAPI-Host": "aerodatabox.p.rapidapi.com",
+      },
+    });
+    if (!apiRes.ok) return res.json(null);
+    const data = await apiRes.json();
+    const departures = data.departures || [];
+
+    let onTime = 0, delayed = 0, cancelled = 0, totalDelayMin = 0, delayedCount = 0;
+
+    departures.forEach((f) => {
+      const status = (f.status || "").toLowerCase();
+      if (status.includes("cancel")) {
+        cancelled++;
+        return;
+      }
+      const scheduled = f.departure?.scheduledTime?.local;
+      const actual = f.departure?.actualTime?.local || f.departure?.revisedTime?.local || f.departure?.predictedTime?.local;
+      if (scheduled && actual) {
+        const diffMin = Math.round((new Date(actual) - new Date(scheduled)) / 60000);
+        if (diffMin > 15) {
+          delayed++;
+          totalDelayMin += diffMin;
+          delayedCount++;
+        } else {
+          onTime++;
+        }
+      } else {
+        onTime++;
+      }
+    });
+
+    const total = onTime + delayed + cancelled;
+    const otpPercent = total > 0 ? Math.round(((onTime) / total) * 100) : null;
+    const avgDelay = delayedCount > 0 ? Math.round(totalDelayMin / delayedCount) : 0;
+
+    res.json({
+      icao,
+      totalFlights: total,
+      onTime,
+      delayed,
+      cancelled,
+      otpPercent,
+      avgDelayMin: avgDelay,
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.get("/api/aircraft-history/:reg/:date", async (req, res) => {
+  try {
+    const { reg, date } = req.params;
+    const url = "https://aerodatabox.p.rapidapi.com/flights/reg/" + reg + "/" + date + "/" + date;
+    const apiRes = await fetch(url, {
+      headers: {
+        "X-RapidAPI-Key": AERODATABOX_KEY,
+        "X-RapidAPI-Host": "aerodatabox.p.rapidapi.com",
+      },
+    });
+    if (!apiRes.ok) return res.json([]);
+    const data = await apiRes.json();
+    res.json(Array.isArray(data) ? data : []);
+  } catch (err) {
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.get("/api/live-position-hex/:hex", async (req, res) => {
+  try {
+    const { hex } = req.params;
+    const apiRes = await fetch("https://api.airplanes.live/v2/hex/" + hex);
+    if (!apiRes.ok) return res.json(null);
+    const data = await apiRes.json();
+    const match = data.ac && data.ac[0];
+    if (!match) return res.json(null);
+    res.json({
+      lat: match.lat,
+      lon: match.lon,
+      altitude: match.alt_baro,
+      speed: match.gs,
+      heading: match.track,
+      onGround: match.alt_baro === "ground",
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
 app.get("/api/aircraft/:reg", async (req, res) => {
   try {
     const { reg } = req.params;
