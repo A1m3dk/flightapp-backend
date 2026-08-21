@@ -92,7 +92,6 @@ app.get("/api/airport-stats/:iata", async (req, res) => {
     if (!apiRes.ok) return res.status(apiRes.status).json({ error: "AirLabs error", status: apiRes.status });
 
     const data = await apiRes.json();
-    console.log("AirLabs raw response:", JSON.stringify(data).slice(0, 500));
     const flights = Array.isArray(data.response) ? data.response : [];
 
     let onTime = 0, delayed = 0, cancelled = 0, totalDelayMin = 0, delayedCount = 0;
