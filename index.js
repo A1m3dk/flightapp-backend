@@ -302,6 +302,72 @@ app.get("/api/tracked/:subscriptionId", async (req, res) => {
   }
 });
 
+const airportResolveCache = new Map();
+
+async function resolveIataToIcao(iata) {
+  const cached = airportResolveCache.get(iata);
+  if (cached) return cached;
+
+  const url = "https://aerodatabox.p.rapidapi.com/airports/iata/" + iata;
+  const apiRes = await fetch(url, {
+    headers: {
+      "X-RapidAPI-Key": AERODATABOX_KEY,
+      "X-RapidAPI-Host": "aerodatabox.p.rapidapi.com",
+    },
+  });
+  if (!apiRes.ok) return null;
+  const data = await apiRes.json();
+  const icao = data.icao;
+  if (icao) airportResolveCache.set(iata, icao);
+  return icao;
+}
+
+app.get("/api/route-search/:depIata/:arrIata/:date", async (req, res) => {
+  try {
+    const { depIata, arrIata, date } = req.params;
+    const depIcao = await resolveIataToIcao(depIata);
+    if (!depIcao) return res.status(404).json({ error: "Departure airport not found" });
+
+    const windows = [
+      [date + "T00:00", date + "T12:00"],
+      [date + "T12:00", date + "T23:59"],
+    ];
+
+    let allFlights = [];
+    for (const [from, to] of windows) {
+      const url = "https://aerodatabox.p.rapidapi.com/flights/airports/icao/" + depIcao +
+        "/" + from + "/" + to + "?direction=Departure&withCancelled=false";
+      const apiRes = await fetch(url, {
+        headers: {
+          "X-RapidAPI-Key": AERODATABOX_KEY,
+          "X-RapidAPI-Host": "aerodatabox.p.rapidapi.com",
+        },
+      });
+      if (apiRes.ok) {
+        const data = await apiRes.json();
+        allFlights = allFlights.concat(data.departures || []);
+      }
+    }
+
+    const matches = allFlights.filter(
+      (f) => f.arrival?.airport?.iata?.toUpperCase() === arrIata.toUpperCase()
+    );
+
+    const results = matches.map((f) => ({
+      number: f.number,
+      airline: f.airline?.name,
+      aircraftModel: f.aircraft?.model,
+      departureScheduled: f.departure?.scheduledTime?.local,
+      arrivalScheduled: f.arrival?.scheduledTime?.local,
+      status: f.status,
+    }));
+
+    res.json(results);
+  } catch (err) {
+    res.status(500).json({ error: "Server error", detail: err.message });
+  }
+});
+
 app.post("/api/tracked", async (req, res) => {
   try {
     const { subscriptionId, flightNumber, date, route } = req.body;
@@ -368,6 +434,15 @@ async function checkAllTrackedFlights() {
       if (!f.notifiedLanding && statusPhase === "ARRIVED") {
         sendPushToSubscription(f.subscriptionId, f.flightNumber + " has landed", "The flight has arrived.");
         updates.notifiedLanding = true;
+      }
+
+      const arrivalRef = arr?.actualTime?.local || arr?.predictedTime?.local || arr?.scheduledTime?.local;
+      if (arrivalRef) {
+        const hoursSinceArrival = (Date.now() - new Date(arrivalRef).getTime()) / (1000 * 60 * 60);
+        if (hoursSinceArrival >= 24) {
+          await TrackedFlight.findByIdAndDelete(f._id);
+          continue;
+        }
       }
 
       await TrackedFlight.findByIdAndUpdate(f._id, updates);
