@@ -75,66 +75,60 @@ app.get("/api/flight/:number/:date", async (req, res) => {
   }
 });
 
-app.get("/api/airport-stats/:icao", async (req, res) => {
+const airportStatsCache = new Map();
+const CACHE_DURATION_MS = 15 * 60 * 1000;
+
+app.get("/api/airport-stats/:iata", async (req, res) => {
   try {
-    const { icao } = req.params;
-    const now = new Date();
-    const from = new Date(now.getTime() - 3 * 60 * 60 * 1000);
-    const to = new Date(now.getTime() + 3 * 60 * 60 * 1000);
-    const fmt = (d) => d.toISOString().slice(0, 16);
+    const { iata } = req.params;
 
-    const url = "https://aerodatabox.p.rapidapi.com/flights/airports/icao/" + icao +
-      "/" + fmt(from) + "/" + fmt(to) + "?direction=Departure&withCancelled=true";
+    const cached = airportStatsCache.get(iata);
+    if (cached && Date.now() - cached.timestamp < CACHE_DURATION_MS) {
+      return res.json(cached.data);
+    }
 
-    const apiRes = await fetch(url, {
-      headers: {
-        "X-RapidAPI-Key": AERODATABOX_KEY,
-        "X-RapidAPI-Host": "aerodatabox.p.rapidapi.com",
-      },
-    });
-    if (!apiRes.ok) return res.json(null);
+    const url = "https://airlabs.co/api/v9/schedules?dep_iata=" + iata + "&api_key=" + process.env.AIRLABS_KEY;
+    const apiRes = await fetch(url);
+    if (!apiRes.ok) return res.status(apiRes.status).json({ error: "AirLabs error", status: apiRes.status });
+
     const data = await apiRes.json();
-    const departures = data.departures || [];
+    const flights = Array.isArray(data.response) ? data.response : [];
 
     let onTime = 0, delayed = 0, cancelled = 0, totalDelayMin = 0, delayedCount = 0;
 
-    departures.forEach((f) => {
+    flights.forEach((f) => {
       const status = (f.status || "").toLowerCase();
       if (status.includes("cancel")) {
         cancelled++;
         return;
       }
-      const scheduled = f.departure?.scheduledTime?.local;
-      const actual = f.departure?.actualTime?.local || f.departure?.revisedTime?.local || f.departure?.predictedTime?.local;
-      if (scheduled && actual) {
-        const diffMin = Math.round((new Date(actual) - new Date(scheduled)) / 60000);
-        if (diffMin > 15) {
-          delayed++;
-          totalDelayMin += diffMin;
-          delayedCount++;
-        } else {
-          onTime++;
-        }
+      const delayMin = f.delayed || 0;
+      if (delayMin > 15) {
+        delayed++;
+        totalDelayMin += delayMin;
+        delayedCount++;
       } else {
         onTime++;
       }
     });
 
     const total = onTime + delayed + cancelled;
-    const otpPercent = total > 0 ? Math.round(((onTime) / total) * 100) : null;
+    const otpPercent = total > 0 ? Math.round((onTime / total) * 100) : null;
     const avgDelay = delayedCount > 0 ? Math.round(totalDelayMin / delayedCount) : 0;
 
-    res.json({
-      icao,
+    const result = {
+      iata,
       totalFlights: total,
       onTime,
       delayed,
       cancelled,
       otpPercent,
       avgDelayMin: avgDelay,
-    });
+    };
+    airportStatsCache.set(iata, { data: result, timestamp: Date.now() });
+    res.json(result);
   } catch (err) {
-    res.status(500).json({ error: "Server error" });
+    res.status(500).json({ error: "Server error", detail: err.message });
   }
 });
 
