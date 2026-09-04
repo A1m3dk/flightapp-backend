@@ -92,6 +92,7 @@ app.get("/api/airport-stats/:iata", async (req, res) => {
     if (!apiRes.ok) return res.status(apiRes.status).json({ error: "AirLabs error", status: apiRes.status });
 
     const data = await apiRes.json();
+    console.log("AirLabs raw response:", JSON.stringify(data).slice(0, 500));
     const flights = Array.isArray(data.response) ? data.response : [];
 
     let onTime = 0, delayed = 0, cancelled = 0, totalDelayMin = 0, delayedCount = 0;
@@ -430,15 +431,6 @@ async function checkAllTrackedFlights() {
         updates.notifiedLanding = true;
       }
 
-      const arrivalRef = arr?.actualTime?.local || arr?.predictedTime?.local || arr?.scheduledTime?.local;
-      if (arrivalRef) {
-        const hoursSinceArrival = (Date.now() - new Date(arrivalRef).getTime()) / (1000 * 60 * 60);
-        if (hoursSinceArrival >= 24) {
-          await TrackedFlight.findByIdAndDelete(f._id);
-          continue;
-        }
-      }
-
       await TrackedFlight.findByIdAndUpdate(f._id, updates);
     } catch (err) {
       // skip this flight, keep checking the rest
@@ -449,4 +441,3 @@ async function checkAllTrackedFlights() {
 cron.schedule("*/5 * * * *", checkAllTrackedFlights);
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log("Backend running on port " + PORT));
