@@ -356,16 +356,11 @@ app.get("/api/route-search/:depIata/:arrIata/:date", async (req, res) => {
     }
 
     console.log("route-search: total flights fetched from " + depIcao + ":", allFlights.length);
-    console.log("route-search: looking for arrIata=" + arrIata + " arrIcao=" + arrIcao);
-    console.log("route-search: sample arrival codes:", allFlights.slice(0, 8).map((f) => ({
-      iata: f.arrival?.airport?.iata,
-      icao: f.arrival?.airport?.icao,
-      name: f.arrival?.airport?.name,
-    })));
+    console.log("route-search: sample entry:", JSON.stringify(allFlights[0]).slice(0, 400));
 
     const matches = allFlights.filter((f) => {
-      const fIata = f.arrival?.airport?.iata?.toUpperCase();
-      const fIcao = f.arrival?.airport?.icao?.toUpperCase();
+      const fIata = f.movement?.airport?.iata?.toUpperCase();
+      const fIcao = f.movement?.airport?.icao?.toUpperCase();
       return fIata === arrIata.toUpperCase() || (arrIcao && fIcao === arrIcao.toUpperCase());
     });
 
@@ -375,8 +370,8 @@ app.get("/api/route-search/:depIata/:arrIata/:date", async (req, res) => {
       number: f.number,
       airline: f.airline?.name,
       aircraftModel: f.aircraft?.model,
-      departureScheduled: f.departure?.scheduledTime?.local,
-      arrivalScheduled: f.arrival?.scheduledTime?.local,
+      departureScheduled: f.movement?.scheduledTime?.local,
+      arrivalScheduled: null,
       status: f.status,
     }));
 
