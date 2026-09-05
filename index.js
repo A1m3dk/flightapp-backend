@@ -367,13 +367,15 @@ app.get("/api/route-search/:depIata/:arrIata/:date", async (req, res) => {
     console.log("route-search matches found:", matches.length);
 
     const results = matches.map((f) => ({
-      number: f.number,
+      number: (f.number || "").trim(),
       airline: f.airline?.name,
       aircraftModel: f.aircraft?.model,
       departureScheduled: f.movement?.scheduledTime?.local,
       arrivalScheduled: null,
       status: f.status,
     }));
+
+    console.log("route-search: returned numbers:", results.map((r) => r.number));
 
     res.json(results);
   } catch (err) {
