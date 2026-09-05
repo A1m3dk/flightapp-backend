@@ -290,21 +290,19 @@ app.get("/api/airport-stats/:iata", async (req, res) => {
 app.get("/api/airport-search/:term", async (req, res) => {
   try {
     const { term } = req.params;
-    const url = "https://aerodatabox.p.rapidapi.com/airports/search/term?q=" + encodeURIComponent(term) + "&limit=8";
-    const apiRes = await fetch(url, { headers: adbHeaders });
+    const url = "https://airlabs.co/api/v9/suggest?q=" + encodeURIComponent(term) + "&api_key=" + AIRLABS_KEY;
+    const apiRes = await fetch(url);
     if (!apiRes.ok) return res.json([]);
     const data = await apiRes.json();
-    const items = Array.isArray(data.items) ? data.items : [];
-    const results = items
-      .filter((a) => a.iata)
-      .map((a) => ({
-        iata: a.iata,
-        icao: a.icao,
-        name: a.name,
-        city: a.municipalityName,
-        country: a.countryCode,
-      }));
-    res.json(results);
+    const airports = (data.response && data.response.airports) || [];
+    const results = airports.slice(0, 8).map((a) => ({
+      iata: a.iata_code,
+      icao: a.icao_code,
+      name: a.name,
+      city: a.city,
+      country: a.country_code,
+    }));
+    res.json(results.filter((a) => a.iata));
   } catch (err) {
     res.status(500).json({ error: "Server error", detail: err.message });
   }
@@ -326,56 +324,24 @@ async function resolveIataToIcao(iata) {
 
 app.get("/api/route-search/:depIata/:arrIata/:date", async (req, res) => {
   try {
-    const { depIata, arrIata, date } = req.params;
-    const depIcao = await resolveIataToIcao(depIata.toUpperCase());
-    if (!depIcao) return res.status(404).json({ error: "Departure airport not found" });
+    const { depIata, arrIata } = req.params;
+    const url = "https://airlabs.co/api/v9/schedules?dep_iata=" + depIata.toUpperCase() +
+      "&arr_iata=" + arrIata.toUpperCase() + "&api_key=" + AIRLABS_KEY;
+    const apiRes = await fetch(url);
+    if (!apiRes.ok) return res.status(apiRes.status).json({ error: "AirLabs error" });
 
-    await new Promise((resolve) => setTimeout(resolve, 1100));
+    const data = await apiRes.json();
+    const flights = Array.isArray(data.response) ? data.response : [];
 
-    const arrIcao = await resolveIataToIcao(arrIata.toUpperCase());
-
-    await new Promise((resolve) => setTimeout(resolve, 1100));
-
-    const windows = [
-      [date + "T00:00", date + "T12:00"],
-      [date + "T12:00", date + "T23:59"],
-    ];
-
-    let allFlights = [];
-    for (const [from, to] of windows) {
-      const url = "https://aerodatabox.p.rapidapi.com/flights/airports/icao/" + depIcao +
-        "/" + from + "/" + to + "?direction=Departure&withCancelled=false";
-      const apiRes = await fetch(url, { headers: adbHeaders });
-      if (apiRes.ok) {
-        const data = await apiRes.json();
-        allFlights = allFlights.concat(data.departures || []);
-      } else {
-        console.log("route-search window fetch failed:", apiRes.status, await apiRes.text());
-      }
-      await new Promise((resolve) => setTimeout(resolve, 1100));
-    }
-
-    console.log("route-search: total flights fetched from " + depIcao + ":", allFlights.length);
-    console.log("route-search: sample entry:", JSON.stringify(allFlights[0]).slice(0, 400));
-
-    const matches = allFlights.filter((f) => {
-      const fIata = f.movement?.airport?.iata?.toUpperCase();
-      const fIcao = f.movement?.airport?.icao?.toUpperCase();
-      return fIata === arrIata.toUpperCase() || (arrIcao && fIcao === arrIcao.toUpperCase());
-    });
-
-    console.log("route-search matches found:", matches.length);
-
-    const results = matches.map((f) => ({
-      number: (f.number || "").trim(),
-      airline: f.airline?.name,
-      aircraftModel: f.aircraft?.model,
-      departureScheduled: f.movement?.scheduledTime?.local,
-      arrivalScheduled: null,
+    const results = flights.map((f) => ({
+      number: (f.flight_iata || "").trim(),
+      airline: f.airline_iata,
+      aircraftModel: null,
+      departureScheduled: f.dep_time,
+      arrivalScheduled: f.arr_time,
       status: f.status,
+      codeshare: f.cs_flight_iata || null,
     }));
-
-    console.log("route-search: returned numbers:", results.map((r) => r.number));
 
     res.json(results);
   } catch (err) {
