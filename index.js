@@ -356,6 +356,12 @@ app.get("/api/route-search/:depIata/:arrIata/:date", async (req, res) => {
     }
 
     console.log("route-search: total flights fetched from " + depIcao + ":", allFlights.length);
+    console.log("route-search: looking for arrIata=" + arrIata + " arrIcao=" + arrIcao);
+    console.log("route-search: sample arrival codes:", allFlights.slice(0, 8).map((f) => ({
+      iata: f.arrival?.airport?.iata,
+      icao: f.arrival?.airport?.icao,
+      name: f.arrival?.airport?.name,
+    })));
 
     const matches = allFlights.filter((f) => {
       const fIata = f.arrival?.airport?.iata?.toUpperCase();
