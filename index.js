@@ -346,6 +346,7 @@ app.get("/api/route-search/:depIata/:arrIata/:date", async (req, res) => {
       } else {
         console.log("route-search window fetch failed:", apiRes.status, await apiRes.text());
       }
+      await new Promise((resolve) => setTimeout(resolve, 1100));
     }
 
     console.log("route-search: total flights fetched from " + depIcao + ":", allFlights.length);
