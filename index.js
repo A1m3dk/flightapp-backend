@@ -330,6 +330,12 @@ app.get("/api/route-search/:depIata/:arrIata/:date", async (req, res) => {
     const depIcao = await resolveIataToIcao(depIata.toUpperCase());
     if (!depIcao) return res.status(404).json({ error: "Departure airport not found" });
 
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+
+    const arrIcao = await resolveIataToIcao(arrIata.toUpperCase());
+
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+
     const windows = [
       [date + "T00:00", date + "T12:00"],
       [date + "T12:00", date + "T23:59"],
@@ -350,13 +356,14 @@ app.get("/api/route-search/:depIata/:arrIata/:date", async (req, res) => {
     }
 
     console.log("route-search: total flights fetched from " + depIcao + ":", allFlights.length);
-    if (allFlights.length > 0) {
-      console.log("sample arrival iata values:", allFlights.slice(0, 5).map((f) => f.arrival?.airport?.iata));
-    }
 
-    const matches = allFlights.filter(
-      (f) => f.arrival?.airport?.iata?.toUpperCase() === arrIata.toUpperCase()
-    );
+    const matches = allFlights.filter((f) => {
+      const fIata = f.arrival?.airport?.iata?.toUpperCase();
+      const fIcao = f.arrival?.airport?.icao?.toUpperCase();
+      return fIata === arrIata.toUpperCase() || (arrIcao && fIcao === arrIcao.toUpperCase());
+    });
+
+    console.log("route-search matches found:", matches.length);
 
     const results = matches.map((f) => ({
       number: f.number,
