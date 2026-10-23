@@ -349,6 +349,43 @@ app.get("/api/route-search/:depIata/:arrIata/:date", async (req, res) => {
   }
 });
 
+const metarCache = new Map();
+const METAR_CACHE_MS = 10 * 60 * 1000;
+
+async function fetchWeatherText(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const r = await fetch(url, {
+      signal: controller.signal,
+      headers: { "User-Agent": "FlightApp personal project" },
+    });
+    if (!r.ok) return "";
+    return (await r.text()).trim();
+  } catch (err) {
+    return "";
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+app.get("/api/metar/:icao", async (req, res) => {
+  const icao = req.params.icao.toUpperCase();
+  if (!/^[A-Z0-9]{4}$/.test(icao)) return res.status(400).json({ error: "Invalid airport code" });
+
+  const cached = metarCache.get(icao);
+  if (cached && Date.now() - cached.timestamp < METAR_CACHE_MS) return res.json(cached.data);
+
+  const [metar, taf] = await Promise.all([
+    fetchWeatherText("https://aviationweather.gov/api/data/metar?ids=" + icao + "&format=raw"),
+    fetchWeatherText("https://aviationweather.gov/api/data/taf?ids=" + icao + "&format=raw"),
+  ]);
+
+  const data = { icao, metar, taf };
+  if (metar || taf) metarCache.set(icao, { data, timestamp: Date.now() });
+  res.json(data);
+});
+
 async function checkAllTrackedFlights() {
   const flights = await TrackedFlight.find({});
   for (const f of flights) {
