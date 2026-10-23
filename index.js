@@ -537,10 +537,6 @@ async function checkAllTrackedFlights() {
           continue;
         }
 
-        app.get("/api/health", (req, res) => {
-  checkAllTrackedFlights().catch((err) => console.log("health-triggered check failed:", err.message));
-  res.json({ ok: true, time: new Date().toISOString() });
-});
 
         const dep = data.departure;
         const arr = data.arrival;
@@ -645,6 +641,11 @@ async function checkAllTrackedFlights() {
 }
 
 cron.schedule("*/5 * * * *", checkAllTrackedFlights);
+
+app.get("/api/health", (req, res) => {
+  checkAllTrackedFlights().catch((err) => console.log("health-triggered check failed:", err.message));
+  res.json({ ok: true, time: new Date().toISOString() });
+});
 
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log("Backend running on port " + PORT));
