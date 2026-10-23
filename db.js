@@ -12,6 +12,15 @@ const trackedFlightSchema = new mongoose.Schema({
   notifiedBoardingEnd: { type: Boolean, default: false },
   notifiedTakeoff: { type: Boolean, default: false },
   notifiedLanding: { type: Boolean, default: false },
+  notifiedCancelled: { type: Boolean, default: false },
+  inboundResolved: { type: Boolean, default: false },
+  lastCheckedAt: Date,
+  lastInboundCheckAt: Date,
+  lastPhase: String,
+  scheduledDepMs: Number,
+  depTargetMs: Number,
+  etaMs: Number,
+  arrivalRefMs: Number,
   subscriptionId: String,
 });
 

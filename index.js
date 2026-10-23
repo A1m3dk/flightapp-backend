@@ -39,7 +39,7 @@ async function fetchFlightData(number, date) {
 function getDelayMinutes(leg) {
   if (!leg) return 0;
   const scheduled = leg.scheduledTime?.local;
-  const actual = leg.actualTime?.local || leg.predictedTime?.local;
+  const actual = leg.actualTime?.local || leg.revisedTime?.local || leg.predictedTime?.local;
   if (!scheduled || !actual) return 0;
   const diffMin = Math.round((new Date(actual) - new Date(scheduled)) / 60000);
   return diffMin > 0 ? diffMin : 0;
@@ -386,66 +386,261 @@ app.get("/api/metar/:icao", async (req, res) => {
   res.json(data);
 });
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const WIDEBODY = /A330|A340|A350|A380|747|767|777|787/i;
+
+function toMs(t) {
+  const s = t && (t.utc || t.local);
+  if (!s) return null;
+  const d = new Date(s.replace(" ", "T"));
+  return isNaN(d.getTime()) ? null : d.getTime();
+}
+
+function arrivalEstimate(arr) {
+  const revised = toMs(arr?.revisedTime);
+  if (revised) return revised;
+  const predicted = toMs(arr?.predictedTime);
+  if (predicted) return predicted;
+  const runway = toMs(arr?.runwayTime);
+  if (runway) return runway + 8 * 60000;
+  return toMs(arr?.scheduledTime);
+}
+
+function formatClock(ms, tz) {
+  try {
+    return new Date(ms).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: tz || undefined });
+  } catch (err) {
+    return new Date(ms).toISOString().slice(11, 16) + " UTC";
+  }
+}
+
+function pollIntervalMinutes(f) {
+  const nowMs = Date.now();
+  if (f.lastPhase === "AIRBORNE") {
+    const minsToEta = f.etaMs ? (f.etaMs - nowMs) / 60000 : null;
+    return minsToEta != null && minsToEta <= 90 ? 10 : 45;
+  }
+  const depMs = f.depTargetMs || f.scheduledDepMs || new Date(f.date + "T12:00:00Z").getTime();
+  const mins = (depMs - nowMs) / 60000;
+  if (mins > 2880) return 720;
+  if (mins > 720) return 180;
+  if (mins > 180) return 60;
+  if (mins > 60) return 20;
+  if (mins > -90) return 10;
+  return 45;
+}
+
+async function checkInbound(f, data, depSchedMs, depTargetMs) {
+  const reg = data.aircraft?.reg;
+  const depIcao = data.departure?.airport?.icao;
+  if (!reg || !depIcao || !depSchedMs) return null;
+
+  const url = "https://aerodatabox.p.rapidapi.com/flights/reg/" + reg + "/" + f.date + "/" + f.date;
+  const apiRes = await fetch(url, { headers: adbHeaders });
+  if (!apiRes.ok) return null;
+  const history = await apiRes.json();
+  if (!Array.isArray(history)) return null;
+
+  const mine = (f.flightNumber || "").replace(/\s/g, "").toUpperCase();
+  const inbound = history
+    .filter((h) => {
+      const arrSched = toMs(h.arrival?.scheduledTime);
+      return (
+        (h.number || "").replace(/\s/g, "").toUpperCase() !== mine &&
+        h.arrival?.airport?.icao === depIcao &&
+        arrSched &&
+        arrSched <= depSchedMs
+      );
+    })
+    .sort((a, b) => toMs(b.arrival.scheduledTime) - toMs(a.arrival.scheduledTime))[0];
+  if (!inbound) return null;
+
+  const arrivalMs = arrivalEstimate(inbound.arrival);
+  if (!arrivalMs) return null;
+
+  const turnaround = WIDEBODY.test(data.aircraft?.model || "") ? 60 : 40;
+  const readyMs = arrivalMs + turnaround * 60000;
+  const shortfall = Math.round((readyMs - depTargetMs) / 60000);
+
+  return {
+    number: inbound.number,
+    from: inbound.departure?.airport?.iata || inbound.departure?.airport?.icao || "?",
+    arrivalMs,
+    shortfall,
+    late: shortfall > 10,
+    landed: /arriv|land/i.test(inbound.status || ""),
+  };
+}
+
+async function sendTimeBasedAlerts(f, nowMs) {
+  const phase = f.lastPhase || "NOT DEPARTED";
+  if (phase !== "NOT DEPARTED" || !f.depTargetMs || !f.scheduledDepMs) return;
+
+  const minsToSched = (f.scheduledDepMs - nowMs) / 60000;
+  const minsToTarget = (f.depTargetMs - nowMs) / 60000;
+  const updates = {};
+
+  if (!f.notifiedCheckin && minsToSched <= 24 * 60 && minsToTarget > 45) {
+    sendPushToSubscription(f.subscriptionId, f.flightNumber + " check-in open", "Online check-in is now open.");
+    updates.notifiedCheckin = true;
+  }
+  if (!f.notifiedBoardingStart && minsToTarget <= 45 && minsToTarget > 0) {
+    sendPushToSubscription(f.subscriptionId, f.flightNumber + " boarding", "Boarding is expected to begin soon.");
+    updates.notifiedBoardingStart = true;
+  }
+  if (!f.notifiedBoardingEnd && minsToTarget <= 15 && minsToTarget > -5) {
+    sendPushToSubscription(f.subscriptionId, f.flightNumber + " boarding closing", "Boarding closes shortly. Head to the gate.");
+    updates.notifiedBoardingEnd = true;
+  }
+
+  if (Object.keys(updates).length > 0) {
+    await TrackedFlight.findByIdAndUpdate(f._id, updates);
+  }
+}
+
+let checkRunning = false;
+
 async function checkAllTrackedFlights() {
-  const flights = await TrackedFlight.find({});
-  for (const f of flights) {
-    try {
-      const data = await fetchFlightData(f.flightNumber, f.date);
-      const dep = data.departure;
-      const arr = data.arrival;
+  if (checkRunning) return;
+  checkRunning = true;
+  try {
+    const flights = await TrackedFlight.find({});
+    for (const f of flights) {
+      try {
+        const nowMs = Date.now();
 
-      const depDelay = getDelayMinutes(dep);
-      const arrDelay = getDelayMinutes(arr);
-      const newStatus = depDelay > 15 || arrDelay > 15 ? "Delayed" : "On time";
-      const statusPhase = getStatusPhase(data.status);
-      const scheduledDep = dep?.scheduledTime?.local;
-      const minsToGo = scheduledDep ? (new Date(scheduledDep) - new Date()) / 60000 : null;
-
-      const updates = { lastStatus: newStatus, lastGate: dep?.gate, lastTerminal: dep?.terminal };
-
-      if (f.lastStatus && f.lastStatus !== newStatus) {
-        sendPushToSubscription(f.subscriptionId, f.flightNumber + " status changed", newStatus);
-      }
-      if (f.lastGate !== dep?.gate && dep?.gate) {
-        sendPushToSubscription(f.subscriptionId, f.flightNumber + " gate assigned", "Gate " + dep.gate);
-      }
-      if (f.lastTerminal !== dep?.terminal && dep?.terminal) {
-        sendPushToSubscription(f.subscriptionId, f.flightNumber + " terminal", "Terminal " + dep.terminal);
-      }
-      if (!f.notifiedCheckin && minsToGo != null && minsToGo <= 24 * 60 && minsToGo > 45) {
-        sendPushToSubscription(f.subscriptionId, f.flightNumber + " check-in open", "Online check-in is now open.");
-        updates.notifiedCheckin = true;
-      }
-      if (!f.notifiedBoardingStart && minsToGo != null && minsToGo <= 45 && minsToGo > 0 && statusPhase === "NOT DEPARTED") {
-        sendPushToSubscription(f.subscriptionId, f.flightNumber + " boarding", "Boarding is expected to begin soon.");
-        updates.notifiedBoardingStart = true;
-      }
-      if (!f.notifiedBoardingEnd && minsToGo != null && minsToGo <= 15 && minsToGo > -60 && statusPhase !== "AIRBORNE") {
-        sendPushToSubscription(f.subscriptionId, f.flightNumber + " boarding closing", "Boarding closes shortly. Head to the gate.");
-        updates.notifiedBoardingEnd = true;
-      }
-      if (!f.notifiedTakeoff && statusPhase === "AIRBORNE") {
-        sendPushToSubscription(f.subscriptionId, f.flightNumber + " has taken off", "The flight is now airborne.");
-        updates.notifiedTakeoff = true;
-      }
-      if (!f.notifiedLanding && statusPhase === "ARRIVED") {
-        sendPushToSubscription(f.subscriptionId, f.flightNumber + " has landed", "The flight has arrived.");
-        updates.notifiedLanding = true;
-      }
-
-      const arrivalRef = arr?.actualTime?.local || arr?.predictedTime?.local || arr?.scheduledTime?.local;
-      if (arrivalRef) {
-        const hoursSinceArrival = (Date.now() - new Date(arrivalRef).getTime()) / (1000 * 60 * 60);
-        if (hoursSinceArrival >= 24) {
+        if (f.arrivalRefMs && (nowMs - f.arrivalRefMs) / 3600000 >= 24) {
           await TrackedFlight.findByIdAndDelete(f._id);
           continue;
         }
-      }
 
-      await TrackedFlight.findByIdAndUpdate(f._id, updates);
-    } catch (err) {
-      // skip this flight, keep checking the rest
+        await sendTimeBasedAlerts(f, nowMs);
+
+        if (f.lastPhase === "ARRIVED" || f.lastPhase === "CANCELLED") continue;
+
+        if (f.lastCheckedAt) {
+          const sinceMin = (nowMs - new Date(f.lastCheckedAt).getTime()) / 60000;
+          if (sinceMin < pollIntervalMinutes(f)) continue;
+        }
+
+        const firstPoll = !f.lastCheckedAt;
+
+        await sleep(1100);
+        let data = null;
+        try {
+          data = await fetchFlightData(f.flightNumber, f.date);
+        } catch (err) {
+          data = null;
+        }
+        if (!data) {
+          await TrackedFlight.findByIdAndUpdate(f._id, { lastCheckedAt: new Date() });
+          continue;
+        }
+
+        app.get("/api/health", (req, res) => {
+  checkAllTrackedFlights().catch((err) => console.log("health-triggered check failed:", err.message));
+  res.json({ ok: true, time: new Date().toISOString() });
+});
+
+        const dep = data.departure;
+        const arr = data.arrival;
+        const newStatus = getDelayMinutes(dep) > 15 || getDelayMinutes(arr) > 15 ? "Delayed" : "On time";
+        const statusPhase = getStatusPhase(data.status);
+        const depSchedMs = toMs(dep?.scheduledTime);
+        const depTargetMs = toMs(dep?.revisedTime) || depSchedMs;
+        const arrRefMs = toMs(arr?.revisedTime) || toMs(arr?.predictedTime) || toMs(arr?.scheduledTime);
+        const minsToGo = depSchedMs ? (depSchedMs - nowMs) / 60000 : null;
+
+        console.log("poll", f.flightNumber, f.date, statusPhase);
+
+        const updates = {
+          lastCheckedAt: new Date(),
+          lastPhase: statusPhase,
+          lastStatus: newStatus,
+          lastGate: dep?.gate,
+          lastTerminal: dep?.terminal,
+        };
+        if (depSchedMs) updates.scheduledDepMs = depSchedMs;
+        if (depTargetMs) updates.depTargetMs = depTargetMs;
+        if (arrRefMs) {
+          updates.etaMs = arrRefMs;
+          updates.arrivalRefMs = arrRefMs;
+        }
+
+        const notify = (title, body) => {
+          if (!firstPoll) sendPushToSubscription(f.subscriptionId, title, body);
+        };
+
+        if (f.lastStatus && f.lastStatus !== newStatus) {
+          notify(f.flightNumber + " status changed", newStatus);
+        }
+        if (dep?.gate && f.lastGate !== dep.gate) {
+          notify(f.flightNumber + (f.lastGate ? " gate changed" : " gate assigned"), "Gate " + dep.gate);
+        }
+        if (dep?.terminal && f.lastTerminal !== dep.terminal) {
+          notify(f.flightNumber + " terminal", "Terminal " + dep.terminal);
+        }
+        if (statusPhase === "CANCELLED" && !f.notifiedCancelled) {
+          notify(f.flightNumber + " cancelled", "This flight has been cancelled. Check with the airline about rebooking.");
+          updates.notifiedCancelled = true;
+        }
+        if (!f.notifiedTakeoff) {
+          if (statusPhase === "AIRBORNE") {
+            notify(f.flightNumber + " has taken off", "The flight is now airborne.");
+            updates.notifiedTakeoff = true;
+          } else if (statusPhase === "ARRIVED") {
+            updates.notifiedTakeoff = true;
+          }
+        }
+        if (!f.notifiedLanding && statusPhase === "ARRIVED") {
+          notify(f.flightNumber + " has landed", "The flight has arrived.");
+          updates.notifiedLanding = true;
+        }
+
+        if (
+          !f.inboundResolved &&
+          statusPhase === "NOT DEPARTED" &&
+          data.aircraft?.reg &&
+          minsToGo != null &&
+          minsToGo <= 300 &&
+          minsToGo > -30
+        ) {
+          const sinceInbound = f.lastInboundCheckAt
+            ? (nowMs - new Date(f.lastInboundCheckAt).getTime()) / 60000
+            : Infinity;
+          if (sinceInbound >= 30) {
+            updates.lastInboundCheckAt = new Date();
+            await sleep(1100);
+            let inbound = null;
+            try {
+              inbound = await checkInbound(f, data, depSchedMs, depTargetMs || depSchedMs);
+            } catch (err) {
+              console.log("inbound check failed:", f.flightNumber, err.message);
+            }
+            if (inbound && inbound.late) {
+              sendPushToSubscription(
+                f.subscriptionId,
+                f.flightNumber + " may be delayed",
+                "Your aircraft (" + inbound.number + " from " + inbound.from + ") " +
+                  (inbound.landed ? "landed" : "is due") + " at " +
+                  formatClock(inbound.arrivalMs, dep?.airport?.timeZone) +
+                  ". Departure could slip by about " + inbound.shortfall + " min."
+              );
+              updates.inboundResolved = true;
+            } else if (inbound && inbound.landed) {
+              updates.inboundResolved = true;
+            }
+          }
+        }
+
+        await TrackedFlight.findByIdAndUpdate(f._id, updates);
+      } catch (err) {
+        console.log("tracked flight check failed:", f.flightNumber, err.message);
+        await TrackedFlight.findByIdAndUpdate(f._id, { lastCheckedAt: new Date() }).catch(() => {});
+      }
     }
+  } finally {
+    checkRunning = false;
   }
 }
 
