@@ -47,7 +47,7 @@ function getDelayMinutes(leg) {
 
 function getStatusPhase(status) {
   const s = (status || "").toLowerCase();
-  if (s.includes("enroute") || s.includes("approach") || s.includes("diverted")) return "AIRBORNE";
+  if (s.includes("enroute") || s.includes("approach") || s.includes("diverted") || s.includes("departed")) return "AIRBORNE";
   if (s.includes("landed") || s.includes("arrived")) return "ARRIVED";
   if (s.includes("cancel")) return "CANCELLED";
   return "NOT DEPARTED";
