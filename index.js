@@ -72,6 +72,21 @@ app.get("/api/flight/:number/:date", async (req, res) => {
   }
 });
 
+app.post("/api/test-push", async (req, res) => {
+  try {
+    const record = await PushSubscription.findOne({ subscriptionId: req.body.subscriptionId });
+    if (!record) return res.json({ ok: false, reason: "This device isn't subscribed to alerts yet." });
+    setTimeout(() => {
+      webpush
+        .sendNotification(record.subscription, JSON.stringify({ title: "Flightapp test", body: "Background alerts are working." }))
+        .catch((err) => console.log("test push failed:", err.statusCode || "", err.message));
+    }, 8000);
+    res.json({ ok: true });
+  } catch (err) {
+    res.json({ ok: false, reason: "Server error." });
+  }
+});
+
 app.get("/api/aircraft/:reg", async (req, res) => {
   try {
     const url = "https://aerodatabox.p.rapidapi.com/aircrafts/reg/" + req.params.reg;
